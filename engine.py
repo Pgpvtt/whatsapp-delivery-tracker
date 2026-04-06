@@ -406,8 +406,40 @@ def build_delivery_summary(states: dict) -> list:
             avg_time    = (
                 round(sum(d['store_times']) / len(d['store_times']), 1)
                 if d['store_times'] else None
-            )
-            rows.append({
+            )# ── PERFORMANCE SCORE ─────────────────────────
+
+total = d['deliveries']
+
+delayed = len([x for x in s.deliveries if x.date == date_ and x.is_delayed])
+high_travel = len([x for x in s.deliveries if x.date == date_ and x.high_travel])
+missing = len([x for x in s.deliveries if x.date == date_ and x.missing_pod])
+
+idle = len([e for e in s.exceptions if e.date == date_ and e.kind == 'Idle Time'])
+long_break = len([e for e in s.exceptions if e.date == date_ and e.kind == 'Long Break'])
+
+if total > 0:
+
+    on_time_score = ((total - delayed) / total) * 40
+    delay_penalty = (delayed / total) * 20
+    travel_penalty = (high_travel / total) * 15
+    missing_penalty = (missing / total) * 10
+
+    idle_penalty = min((idle + long_break) * 2, 15)
+
+    performance_score = round(
+        on_time_score
+        - delay_penalty
+        - travel_penalty
+        - missing_penalty
+        - idle_penalty,
+        1
+    )
+else:
+    performance_score = 0
+
+
+# ✅ MUST BE HERE (outside if-else)
+rows.append({
                 'Name':                           name_,
                 'Date':                           date_,
                 'Total Routes':                   len(d['routes']),
