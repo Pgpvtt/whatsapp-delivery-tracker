@@ -145,17 +145,28 @@ def _date_str(ts: datetime) -> str:
 
 
 def _check_gap(state: BoyState, ts: datetime):
+
     if state.last_message_time:
         gap = (ts - state.last_message_time).total_seconds() / 60
-        if gap > GAP_THRESHOLD_MINS:
+
+        # ⚠️ Medium gap (idle)
+        if 60 < gap <= 120:
             state.exceptions.append(Exception_(
                 delivery_boy=state.name,
                 date=_date_str(ts),
                 timestamp=ts,
-                kind='No Activity Gap',
-                detail=(f'{round(gap)} min gap between '
-                        f'{state.last_message_time.strftime("%H:%M")} '
-                        f'and {ts.strftime("%H:%M")}')
+                kind='Idle Time',
+                detail=f'{round(gap)} min gap (possible idle time)'
+            ))
+
+        # 🔴 Long gap (break / issue)
+        elif gap > 120:
+            state.exceptions.append(Exception_(
+                delivery_boy=state.name,
+                date=_date_str(ts),
+                timestamp=ts,
+                kind='Long Break',
+                detail=f'{round(gap)} min gap (long break / inactive)'
             ))
 
 
