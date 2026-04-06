@@ -250,48 +250,71 @@ def process_messages(messages: list) -> dict:
             continue
 
         # ── Exit signal: POD / POD Submitted / Closed ─────────────────────────
-        if _is_exit_signal(text):
-            # Determine pod_type label
-            if RE_POD_SUBMITTED.match(text):
-                ptype = 'POD Submitted'
-            elif RE_CLOSED.match(text):
-                ptype = 'Closed'
-            else:
-                ptype = 'POD'
+       if _is_exit_signal(text):
 
-            if s.pending_store:
-                s.pending_store.pod_time = ts
-                s.pending_store.pod_type = ptype
-                s.pending_store.finalize()
-                # Raise flags
-                if s.pending_store.is_delayed:
-                    s.exceptions.append(Exception_(
-                        delivery_boy=name, date=date, timestamp=ts,
-                        kind='Long Delay',
-                        detail=(f'{ptype} for "{s.pending_store.store_name}" '
-                                f'took {s.pending_store.store_mins} mins '
-                                f'(>{DELAY_THRESHOLD_MINS} min threshold)')
-                    ))
-                if s.pending_store.high_travel:
-                    s.exceptions.append(Exception_(
-                        delivery_boy=name, date=date, timestamp=ts,
-                        kind='High Travel Time',
-                        detail=(f'Travel to "{s.pending_store.store_name}" '
-                                f'took {s.pending_store.travel_mins} mins '
-                                f'(>{TRAVEL_THRESHOLD_MINS} min threshold)')
-                    ))
-                s.deliveries.append(s.pending_store)
-                if s.current_route:
-                    s.current_route.deliveries += 1
-                s.last_exit_time = ts
-                s.pending_store = None
-            else:
-                s.exceptions.append(Exception_(
-                    delivery_boy=name, date=date, timestamp=ts,
-                    kind='POD Without Store',
-                    detail=f'{ptype} logged without a preceding store visit'
-                ))
-            continue
+    # Determine pod_type
+    if RE_POD_SUBMITTED.match(text):
+        ptype = 'POD Submitted'
+    elif RE_CLOSED.match(text):
+        ptype = 'Closed'
+    else:
+        ptype = 'POD'
+
+    # ✅ CASE 1: Normal flow (store exists)
+    if s.pending_store:
+        s.pending_store.pod_time = ts
+        s.pending_store.pod_type = ptype
+        s.pending_store.finalize()
+
+        if s.pending_store.is_delayed:
+            s.exceptions.append(Exception_(
+                delivery_boy=name, date=date, timestamp=ts,
+                kind='Long Delay',
+                detail=f'{ptype} for "{s.pending_store.store_name}" took {s.pending_store.store_mins} mins'
+            ))
+
+        if s.pending_store.high_travel:
+            s.exceptions.append(Exception_(
+                delivery_boy=name, date=date, timestamp=ts,
+                kind='High Travel Time',
+                detail=f'Travel to "{s.pending_store.store_name}" took {s.pending_store.travel_mins} mins'
+            ))
+
+        s.deliveries.append(s.pending_store)
+
+        if s.current_route:
+            s.current_route.deliveries += 1
+
+        s.last_exit_time = ts
+        s.pending_store = None
+
+    # ⚠️ CASE 2: Attach to last delivery if missed
+    elif s.deliveries:
+        last_delivery = s.deliveries[-1]
+
+        if last_delivery.pod_time is None:
+            last_delivery.pod_time = ts
+            last_delivery.pod_type = ptype
+            last_delivery.finalize()
+
+            s.last_exit_time = ts
+
+        else:
+            s.exceptions.append(Exception_(
+                delivery_boy=name, date=date, timestamp=ts,
+                kind='POD Without Store',
+                detail=f'{ptype} logged without valid store context'
+            ))
+
+    # ❌ CASE 3: Truly invalid
+    else:
+        s.exceptions.append(Exception_(
+            delivery_boy=name, date=date, timestamp=ts,
+            kind='POD Without Store',
+            detail=f'{ptype} logged without a preceding store visit'
+        ))
+
+    continue
 
         # ── Store Visit ───────────────────────────────────────────────────────
         if s.current_route:
