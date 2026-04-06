@@ -478,17 +478,15 @@ with t4:
 with t5:
     sec("🔍", "Store Search")
     st.markdown(
-        "Type a store name (or part of it) to find all deliveries to that store "
-        "across all delivery boys and dates."
-    )
+    "Type a store name (or part of it) to find all deliveries to that store "
+    "across all delivery boys and dates."
+)
 
-    query = st.text_input(
-        "Search store name",
-        placeholder="e.g. Sharma, Medical, Pharmacy…",
-        key="store_search_input"
-    )
-
-   query = st.text_input(...)
+query = st.text_input(
+    "Search store name",
+    placeholder="e.g. Sharma, Medical, Pharmacy…",
+    key="store_search_input"
+)
 
 if not srch_f.empty:
 
@@ -499,7 +497,9 @@ if not srch_f.empty:
             srch_f['Store Name'].str.lower().str.startswith(search, na=False)
         ]
 
-        result = result.drop_duplicates(subset=['Store Name', 'Date', 'Delivery Boy'])
+        result = result.drop_duplicates(
+            subset=['Store Name', 'Date', 'Delivery Boy']
+        )
 
     else:
         result = srch_f
@@ -521,38 +521,42 @@ if not srch_f.empty:
         c4.metric("Successful PODs", ok_count)
 
     st.markdown("")
-        if not result.empty:
-            st.dataframe(
-                style_details(result.reset_index(drop=True)),
-                use_container_width=True,
-                height=min(640, 60 + len(result) * 38),
-            )
-            st.caption(f"Showing {len(result)} record(s)")
 
-            # Per-store breakdown when multiple stores match
-            if result['Store Name'].nunique() > 1:
-                st.markdown("#### 📊 Breakdown by Store")
-                breakdown = (
-                    result.groupby('Store Name')
-                    .agg(
-                        Deliveries=('Store Name','count'),
-                        Delivery_Boys=('Delivery Boy','nunique'),
-                        Avg_Store_Time=('Store Time (mins)',
-                                        lambda x: round(
-                                            pd.to_numeric(x, errors='coerce').dropna().mean(), 1
-                                        ) if pd.to_numeric(x, errors='coerce').dropna().size else None),
-                    )
-                    .reset_index()
-                    .rename(columns={
-                        'Delivery_Boys': 'Delivery Boys',
-                        'Avg_Store_Time': 'Avg Store Time (mins)',
-                    })
+    if not result.empty:
+        st.dataframe(
+            style_details(result.reset_index(drop=True)),
+            use_container_width=True,
+            height=min(640, 60 + len(result) * 38),
+        )
+        st.caption(f"Showing {len(result)} record(s)")
+
+        if result['Store Name'].nunique() > 1:
+            st.markdown("#### 📊 Breakdown by Store")
+
+            breakdown = (
+                result.groupby('Store Name')
+                .agg(
+                    Deliveries=('Store Name','count'),
+                    Delivery_Boys=('Delivery Boy','nunique'),
+                    Avg_Store_Time=('Store Time (mins)',
+                        lambda x: round(
+                            pd.to_numeric(x, errors='coerce').dropna().mean(), 1
+                        ) if pd.to_numeric(x, errors='coerce').dropna().size else None),
                 )
-                st.dataframe(breakdown, use_container_width=True)
-        elif query.strip():
-            st.info(f'No deliveries found matching **"{query}"**')
-    else:
-        st.info("No delivery data available.")
+                .reset_index()
+                .rename(columns={
+                    'Delivery_Boys': 'Delivery Boys',
+                    'Avg_Store_Time': 'Avg Store Time (mins)',
+                })
+            )
+
+            st.dataframe(breakdown, use_container_width=True)
+
+    elif query and query.strip():
+        st.info(f'No deliveries found matching "{query}"')
+
+else:
+    st.info("No delivery data available.")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 6 — FLAGS & EXCEPTIONS
