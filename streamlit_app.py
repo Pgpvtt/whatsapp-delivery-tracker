@@ -1,5 +1,5 @@
 """
-WhatsApp Delivery Tracker — Production v2
+WhatsApp Delivery Tracker — Production v3
 Upload → Parse → Analyse → Filter → Store Search → Download Excel
 """
 import sys, os
@@ -7,13 +7,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import streamlit as st
 import pandas as pd
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 
 from chat_parser import parse_chat
 from engine import (process_messages, build_delivery_summary,
-                          build_delivery_details, build_route_summary,
-                          build_exceptions, build_store_search)
-from reporter    import generate_excel
+                    build_delivery_details, build_route_summary,
+                    build_exceptions, build_store_search)
+from reporter import generate_excel
 
 # ════════════════════════════════════════════════════════════════════════════════
 # PAGE CONFIG
@@ -61,10 +61,6 @@ div[data-testid="stTabs"] button[aria-selected="true"] {
   background:#3b82f6 !important; color:#fff !important;
 }
 hr { border-color:#1e2d45 !important; }
-.search-box {
-  background:#111827; border:1px solid #1e2d45; border-radius:12px; padding:20px;
-  margin-bottom:16px;
-}
 </style>
 """, unsafe_allow_html=True)
 
@@ -82,6 +78,19 @@ def sec(icon, title, n=None):
     st.markdown(f'<div class="sec-hdr"><h3>{icon} {title}</h3>{badge}</div>',
                 unsafe_allow_html=True)
 
+def _val(row, key, default="—"):
+    """Safe row accessor — never raises KeyError."""
+    v = row.get(key) if hasattr(row, 'get') else (
+        row[key] if key in row.index else None)
+    if v is None or (isinstance(v, float) and pd.isna(v)) or v == '':
+        return default
+    return v
+
+def _metric(col, label, row, key, suffix=""):
+    v = _val(row, key)
+    col.metric(label, f"{v}{suffix}" if v != "—" else "—")
+
+
 # ── Stylers ───────────────────────────────────────────────────────────────────
 STATUS_STYLE = {
     'OK':          'background:#d4edda;color:#155724;font-weight:700',
@@ -94,14 +103,16 @@ STATUS_STYLE = {
 
 def style_details(df):
     s = pd.DataFrame('', index=df.index, columns=df.columns)
-    for i, v in enumerate(df['Status']):
-        s.at[df.index[i], 'Status'] = STATUS_STYLE.get(v, '')
+    if 'Status' in df.columns:
+        for i, v in enumerate(df['Status']):
+            s.at[df.index[i], 'Status'] = STATUS_STYLE.get(v, '')
     for col, threshold, hi, lo in [
         ('Travel Time (mins)', 60, 'background:#f8d7da;color:#721c24;font-weight:700',
                                    'background:#fff3cd;color:#856404'),
         ('Store Time (mins)',  30, '', 'background:#fff3cd;color:#856404'),
     ]:
-        if col not in df.columns: continue
+        if col not in df.columns:
+            continue
         for i, v in enumerate(df[col]):
             try:
                 fv = float(v)
@@ -115,11 +126,14 @@ def style_details(df):
 
 def style_routes(df):
     s = pd.DataFrame('', index=df.index, columns=df.columns)
+    if 'Status' not in df.columns:
+        return df.style
     for i, row in df.iterrows():
-        s.at[i, 'Status'] = STATUS_STYLE.get(row['Status'], '')
+        s.at[i, 'Status'] = STATUS_STYLE.get(row.get('Status', ''), '')
         try:
-            if float(row.get('Avg Travel Time (mins)', 0) or 0) > 45:
-                s.at[i, 'Avg Travel Time (mins)'] = 'background:#fff3cd;color:#856404'
+            if float(row.get('Avg Travel Time (mins)') or 0) > 45:
+                if 'Avg Travel Time (mins)' in df.columns:
+                    s.at[i, 'Avg Travel Time (mins)'] = 'background:#fff3cd;color:#856404'
         except Exception:
             pass
     return df.style.apply(lambda _: s, axis=None)
@@ -137,12 +151,12 @@ def style_summary(df):
     return df.style.apply(lambda _: s, axis=None)
 
 def style_exc(df):
-    warm = {'Long Delay','No Activity Gap','Break End Without Start','High Travel Time'}
+    warm = {'Long Delay', 'No Activity Gap', 'Break End Without Start', 'High Travel Time'}
     def row_fn(row):
         v = row.get('Exception Type', '')
-        st = ('background:#fff3cd;color:#856404;font-weight:700'
-              if v in warm else 'background:#f8d7da;color:#721c24;font-weight:700')
-        return [st] * len(row)
+        st_style = ('background:#fff3cd;color:#856404;font-weight:700'
+                    if v in warm else 'background:#f8d7da;color:#721c24;font-weight:700')
+        return [st_style] * len(row)
     return df.style.apply(row_fn, axis=1)
 
 
@@ -191,16 +205,21 @@ if not uploaded:
 raw  = uploaded.read()
 text = None
 for enc in ('utf-8', 'utf-8-sig', 'latin-1', 'cp1252'):
-    try: text = raw.decode(enc); break
-    except UnicodeDecodeError: pass
+    try:
+        text = raw.decode(enc)
+        break
+    except UnicodeDecodeError:
+        pass
 
 if not text:
-    st.error("❌ Could not decode file."); st.stop()
+    st.error("❌ Could not decode file.")
+    st.stop()
 
 with st.spinner("⚙️ Parsing & analysing…"):
     messages    = parse_chat(text)
     if not messages:
-        st.error("❌ No valid messages found."); st.stop()
+        st.error("❌ No valid messages found.")
+        st.stop()
     states      = process_messages(messages)
     summary     = build_delivery_summary(states)
     details     = build_delivery_details(states)
@@ -214,12 +233,12 @@ st.success(f"✅ Processed **{uploaded.name}** — {len(messages)} messages pars
 # ════════════════════════════════════════════════════════════════════════════════
 # KPIs
 # ════════════════════════════════════════════════════════════════════════════════
-total_ok      = sum(1 for d in details if d['Status'] == 'OK')
-total_delayed = sum(1 for d in details if d['Status'] == 'Delayed')
-total_missing = sum(1 for d in details if d['Status'] == 'Missing POD')
+total_ok      = sum(1 for d in details if d.get('Status') == 'OK')
+total_delayed = sum(1 for d in details if d.get('Status') == 'Delayed')
+total_missing = sum(1 for d in details if d.get('Status') == 'Missing POD')
 exc_color     = "#ef4444" if exceptions else "#10b981"
 
-k1,k2,k3,k4,k5,k6 = st.columns(6)
+k1, k2, k3, k4, k5, k6 = st.columns(6)
 with k1: st.markdown(kpi("💬", len(messages),  "Messages Parsed"),            unsafe_allow_html=True)
 with k2: st.markdown(kpi("🧑‍💼", len(states), "Delivery Personnel"),          unsafe_allow_html=True)
 with k3: st.markdown(kpi("✅", len(details),   "Total Deliveries", "#10b981"), unsafe_allow_html=True)
@@ -232,7 +251,7 @@ dl_col, _ = st.columns([2, 6])
 with dl_col:
     st.download_button(
         "⬇️  Download Full Excel Report", data=excel_bytes,
-        file_name=f"delivery_report_{uploaded.name.replace('.txt','')}.xlsx",
+        file_name=f"delivery_report_{uploaded.name.replace('.txt', '')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
@@ -241,11 +260,11 @@ st.markdown("---")
 # ════════════════════════════════════════════════════════════════════════════════
 # DATAFRAMES
 # ════════════════════════════════════════════════════════════════════════════════
-df_summary = pd.DataFrame(summary)    if summary    else pd.DataFrame()
-df_details = pd.DataFrame(details)    if details    else pd.DataFrame()
-df_routes  = pd.DataFrame(routes)     if routes     else pd.DataFrame()
-df_exc     = pd.DataFrame(exceptions) if exceptions else pd.DataFrame()
-df_search  = pd.DataFrame(store_index)if store_index else pd.DataFrame()
+df_summary = pd.DataFrame(summary)     if summary     else pd.DataFrame()
+df_details = pd.DataFrame(details)     if details     else pd.DataFrame()
+df_routes  = pd.DataFrame(routes)      if routes      else pd.DataFrame()
+df_exc     = pd.DataFrame(exceptions)  if exceptions  else pd.DataFrame()
+df_search  = pd.DataFrame(store_index) if store_index else pd.DataFrame()
 
 # ════════════════════════════════════════════════════════════════════════════════
 # SIDEBAR — FILTERS
@@ -257,15 +276,14 @@ all_dates  = sorted(df_details['Date'].unique())         if not df_details.empty
 with st.sidebar:
     st.markdown("### 🔍 Filters")
 
-    # Person filter
     sel_people = st.multiselect("Delivery Personnel", all_people, default=all_people)
-    if not sel_people: sel_people = all_people
+    if not sel_people:
+        sel_people = all_people
 
-    # Route filter
     sel_routes = st.multiselect("Route Number", all_routes, default=all_routes)
-    if not sel_routes: sel_routes = all_routes
+    if not sel_routes:
+        sel_routes = all_routes
 
-    # Date range filter
     st.markdown("**Date Range**")
     if all_dates:
         try:
@@ -287,8 +305,8 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("### 📊 Quick Stats")
     if not df_details.empty:
-        nt = pd.to_numeric(df_details['Store Time (mins)'],   errors='coerce').dropna()
-        ni = pd.to_numeric(df_details['Travel Time (mins)'],  errors='coerce').dropna()
+        nt = pd.to_numeric(df_details.get('Store Time (mins)',  pd.Series(dtype=float)), errors='coerce').dropna()
+        ni = pd.to_numeric(df_details.get('Travel Time (mins)', pd.Series(dtype=float)), errors='coerce').dropna()
         st.metric("Avg Store Time",   f"{nt.mean():.1f} min" if not nt.empty else "—")
         st.metric("Avg Travel Time",  f"{ni.mean():.1f} min" if not ni.empty else "—")
         st.metric("Total Exceptions", len(exceptions))
@@ -299,14 +317,16 @@ with st.sidebar:
 
 # ── Apply filters ─────────────────────────────────────────────────────────────
 def _f(df, name_col='Delivery Boy', route_col='Route No.'):
-    if df.empty: return df
-    mask = (df[name_col].isin(sel_people)) & (df['Date'].isin(sel_dates))
+    if df.empty:
+        return df
+    mask = df[name_col].isin(sel_people) & df['Date'].isin(sel_dates)
     if route_col in df.columns:
         mask &= df[route_col].isin(sel_routes)
     return df[mask]
 
 def _fs(df, name_col='Name'):
-    if df.empty: return df
+    if df.empty:
+        return df
     return df[df[name_col].isin(sel_people) & df['Date'].isin(sel_dates)]
 
 det_f  = _f(df_details)
@@ -344,20 +364,24 @@ with t1:
         with r1c3:
             st.markdown("##### ⏱ Avg Store Time (mins)")
             tmp = det_f.copy()
-            tmp['st'] = pd.to_numeric(tmp['Store Time (mins)'], errors='coerce')
-            avg = tmp.groupby('Delivery Boy')['st'].mean().dropna().round(1)
-            if not avg.empty: st.bar_chart(avg.rename("Avg mins"))
-            else: st.info("No store time data.")
+            tmp['_st'] = pd.to_numeric(tmp.get('Store Time (mins)', pd.Series(dtype=float)), errors='coerce')
+            avg = tmp.groupby('Delivery Boy')['_st'].mean().dropna().round(1)
+            if not avg.empty:
+                st.bar_chart(avg.rename("Avg mins"))
+            else:
+                st.info("No store time data.")
 
         st.markdown("")
         r2c1, r2c2, r2c3 = st.columns(3)
         with r2c1:
             st.markdown("##### 🚗 Avg Travel Time (mins)")
             tmp2 = det_f.copy()
-            tmp2['tt'] = pd.to_numeric(tmp2['Travel Time (mins)'], errors='coerce')
-            avg2 = tmp2.groupby('Delivery Boy')['tt'].mean().dropna().round(1)
-            if not avg2.empty: st.bar_chart(avg2.rename("Avg mins"))
-            else: st.info("No travel time data.")
+            tmp2['_tt'] = pd.to_numeric(tmp2.get('Travel Time (mins)', pd.Series(dtype=float)), errors='coerce')
+            avg2 = tmp2.groupby('Delivery Boy')['_tt'].mean().dropna().round(1)
+            if not avg2.empty:
+                st.bar_chart(avg2.rename("Avg mins"))
+            else:
+                st.info("No travel time data.")
         with r2c2:
             st.markdown("##### 🚚 Deliveries per Route")
             if not rte_f.empty:
@@ -369,19 +393,21 @@ with t1:
                 st.info("No route data.")
         with r2c3:
             st.markdown("##### ⚠️ Exceptions by Type")
-            if not exc_f.empty: st.bar_chart(exc_f['Exception Type'].value_counts())
-            else: st.success("✅ No exceptions!")
+            if not exc_f.empty:
+                st.bar_chart(exc_f['Exception Type'].value_counts())
+            else:
+                st.success("✅ No exceptions!")
 
+        # Working time breakdown — only if columns exist
         if not sum_f.empty:
-            st.markdown("")
-            st.markdown("##### 🕐 Working Time Breakdown (mins)")
-            wt = sum_f.copy()
-            wt['Label'] = wt['Name'].str.split().str[0] + ' ' + wt['Date']
-            st.bar_chart(wt.set_index('Label')[[
-                'Total Working Time (mins)',
-                'Total Break Time (mins)',
-                'Net Working Time (mins)',
-            ]])
+            wt_cols = [c for c in ['Total Working Time (mins)', 'Total Break Time (mins)',
+                                   'Net Working Time (mins)'] if c in sum_f.columns]
+            if wt_cols:
+                st.markdown("")
+                st.markdown("##### 🕐 Working Time Breakdown (mins)")
+                wt = sum_f.copy()
+                wt['Label'] = wt['Name'].str.split().str[0] + ' ' + wt['Date']
+                st.bar_chart(wt.set_index('Label')[wt_cols])
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 2 — DAILY SUMMARY
@@ -397,19 +423,30 @@ with t2:
 
         st.markdown("#### 🧑 Person Cards")
         for _, row in sum_f.iterrows():
-            with st.expander(f"👤 {row['Name']}  —  {row['Date']}"):
+            with st.expander(f"👤 {_val(row, 'Name')}  —  {_val(row, 'Date')}"):
                 a, b, c, d = st.columns(4)
-                a.metric("Deliveries",    row['Total Deliveries (POD)'])
-                b.metric("Routes",        row['Total Routes'])
-                c.metric("Net Work Time", f"{row['Net Working Time (mins)']} min")
+                a.metric("Deliveries",   _val(row, 'Total Deliveries (POD)'))
+                b.metric("Routes",       _val(row, 'Total Routes'))
+                c.metric("Net Work Time",
+                         f"{_val(row, 'Net Working Time (mins)')} min"
+                         if _val(row, 'Net Working Time (mins)') != "—" else "—")
                 d.metric("Avg Delivery",
-                         f"{row['Avg Time per Delivery (mins)']} min"
-                         if row['Avg Time per Delivery (mins)'] else "—")
+                         f"{_val(row, 'Avg Time per Delivery (mins)')} min"
+                         if _val(row, 'Avg Time per Delivery (mins)') != "—" else "—")
                 e, f_, g, h = st.columns(4)
-                e.metric("First Activity", row['First Activity'])
-                f_.metric("Last Activity",  row['Last Activity'])
-                g.metric("Break Time",   f"{row['Total Break Time (mins)']} min")
-                h.metric("Stores",       row['Total Stores Covered'])
+                # Use new column names from engine v3
+                e.metric("First Activity",  _val(row, 'First Activity'))
+                f_.metric("Last Activity",  _val(row, 'Last Activity'))
+                g.metric("Break Time",
+                         f"{_val(row, 'Total Break Time (mins)')} min"
+                         if _val(row, 'Total Break Time (mins)') != "—" else "—")
+                h.metric("Stores",          _val(row, 'Total Stores Covered'))
+
+                # Second row — route office times (new columns)
+                if 'Route Start (First)' in sum_f.columns or 'Route End (Last)' in sum_f.columns:
+                    r1, r2 = st.columns(2)
+                    r1.metric("Route Start (Office Departure)", _val(row, 'Route Start (First)'))
+                    r2.metric("Route End (Office Return)",      _val(row, 'Route End (Last)'))
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 3 — DELIVERY DETAILS
@@ -427,8 +464,8 @@ with t3:
         )
         st.markdown("")
         qs1, qs2, qs3, qs4 = st.columns(4)
-        nt = pd.to_numeric(det_f['Store Time (mins)'],  errors='coerce').dropna()
-        ni = pd.to_numeric(det_f['Travel Time (mins)'], errors='coerce').dropna()
+        nt = pd.to_numeric(det_f.get('Store Time (mins)',  pd.Series(dtype=float)), errors='coerce').dropna()
+        ni = pd.to_numeric(det_f.get('Travel Time (mins)', pd.Series(dtype=float)), errors='coerce').dropna()
         qs1.metric("Avg Store Time",  f"{nt.mean():.1f} min" if not nt.empty else "—")
         qs2.metric("Max Store Time",  f"{nt.max():.1f} min"  if not nt.empty else "—")
         qs3.metric("Avg Travel Time", f"{ni.mean():.1f} min" if not ni.empty else "—")
@@ -448,31 +485,30 @@ with t4:
 
         st.markdown("#### 🚚 Route Cards")
         for _, row in rte_f.iterrows():
-            icon = "✅" if row['Status'] == 'Complete' else "❌"
+            status = _val(row, 'Status', 'Unknown')
+            icon   = "✅" if status == 'Complete' else "❌"
             with st.expander(
-                f"{icon}  {row['Delivery Boy']}  —  "
-                f"Route {row['Route No.']}  ({row['Date']})"
+                f"{icon}  {_val(row, 'Delivery Boy')}  —  "
+                f"Route {_val(row, 'Route No.')}  ({_val(row, 'Date')})"
             ):
                 a, b, c, d = st.columns(4)
-                a.metric("Start",      row['Start Time'])
-                b.metric("End",        row['End Time'])
-                c.metric("Deliveries", row['Total Deliveries'])
-                d.metric("Total Time",
-                         f"{row['Route Duration (mins)']} min"
-                         if row['Route Duration (mins)'] else "—")
+                # Engine v3 uses 'Route Start Time' / 'Route End Time'
+                a.metric("Route Start",  _val(row, 'Route Start Time'))
+                b.metric("Route End",    _val(row, 'Route End Time'))
+                c.metric("Deliveries",   _val(row, 'Total Deliveries'))
+                dur = _val(row, 'Route Duration (mins)')
+                d.metric("Duration", f"{dur} min" if dur != "—" else "—")
+
                 e, f_, g, h = st.columns(4)
-                e.metric("Avg Store Time",
-                         f"{row['Avg Store Time (mins)']} min"
-                         if row['Avg Store Time (mins)'] else "—")
-                f_.metric("Avg Travel",
-                          f"{row['Avg Travel Time (mins)']} min"
-                          if row['Avg Travel Time (mins)'] else "—")
-                g.metric("Max Travel",
-                         f"{row['Max Travel Time (mins)']} min"
-                         if row['Max Travel Time (mins)'] else "—")
-                h.metric("Min Travel",
-                         f"{row['Min Travel Time (mins)']} min"
-                         if row['Min Travel Time (mins)'] else "—")
+                avg_s  = _val(row, 'Avg Store Time (mins)')
+                avg_t  = _val(row, 'Avg Travel Time (mins)')
+                max_t  = _val(row, 'Max Travel Time (mins)')
+                min_t  = _val(row, 'Min Travel Time (mins)')
+                stores = _val(row, 'Total Stores Covered')
+                e.metric("Avg Store",    f"{avg_s} min"  if avg_s  != "—" else "—")
+                f_.metric("Avg Travel",  f"{avg_t} min"  if avg_t  != "—" else "—")
+                g.metric("Max Travel",   f"{max_t} min"  if max_t  != "—" else "—")
+                h.metric("Total Stores", stores)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 5 — STORE SEARCH
@@ -504,7 +540,7 @@ with t5:
             c1.metric("Matched Stores",  matched_stores)
             c2.metric("Total Deliveries", len(result))
             c3.metric("Delivery Boys",
-                       result['Delivery Boy'].nunique() if not result.empty else 0)
+                      result['Delivery Boy'].nunique() if not result.empty else 0)
             ok_count = len(result[result['Status'] == 'OK']) if not result.empty else 0
             c4.metric("Successful PODs", ok_count)
             st.markdown("")
@@ -531,7 +567,7 @@ with t5:
                     )
                     .reset_index()
                     .rename(columns={
-                        'Delivery_Boys': 'Delivery Boys',
+                        'Delivery_Boys':  'Delivery Boys',
                         'Avg_Store_Time': 'Avg Store Time (mins)',
                     })
                 )
@@ -574,8 +610,10 @@ with t6:
         st.markdown("#### 👤 Exceptions per Person")
         pivot = (exc_f.groupby(['Delivery Boy', 'Exception Type'])
                  .size().unstack(fill_value=0))
-        st.dataframe(pivot.style.highlight_max(axis=0, color='#f8d7da'),
-                     use_container_width=True)
+        st.dataframe(
+            pivot.style.highlight_max(axis=0, color='#f8d7da'),
+            use_container_width=True
+        )
 
 # ════════════════════════════════════════════════════════════════════════════════
 # FOOTER
@@ -584,14 +622,14 @@ st.markdown("---")
 fc1, fc2 = st.columns([4, 1])
 with fc1:
     st.caption(
-        "WhatsApp Delivery Tracker v2 · "
+        "WhatsApp Delivery Tracker v3 · "
         "Route/Store/POD/Closed/Break · "
         "Multi-person · Android & iOS formats"
     )
 with fc2:
     st.download_button(
         "⬇️ Excel", data=excel_bytes,
-        file_name=f"delivery_report_{uploaded.name.replace('.txt','')}.xlsx",
+        file_name=f"delivery_report_{uploaded.name.replace('.txt', '')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True, key="dl_footer",
     )
