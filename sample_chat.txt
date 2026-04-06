@@ -1,0 +1,80 @@
+"""
+WhatsApp Delivery Tracker — Flask Web App
+"""
+import sys, os
+sys.path.insert(0, os.path.dirname(__file__))
+
+import io, json, base64
+from flask import Flask, request, jsonify, send_file, render_template
+from parser import parse_chat
+from engine import (
+    process_messages,
+    build_delivery_summary,
+    build_delivery_details,
+    build_route_summary,
+    build_exceptions,
+)
+from reporter import generate_excel
+
+app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB
+
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+
+@app.route('/api/process', methods=['POST'])
+def process():
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file uploaded'}), 400
+
+    f = request.files['file']
+    raw = f.read()
+
+    # Try UTF-8, fall back to latin-1 (common in WhatsApp exports)
+    for enc in ('utf-8', 'utf-8-sig', 'latin-1', 'cp1252'):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        return jsonify({'error': 'Could not decode file. Please ensure it is a valid WhatsApp .txt export.'}), 400
+
+    try:
+        messages = parse_chat(text)
+        if not messages:
+            return jsonify({'error': 'No valid messages found. Please check the file format.'}), 400
+
+        states = process_messages(messages)
+        summary    = build_delivery_summary(states)
+        details    = build_delivery_details(states)
+        routes     = build_route_summary(states)
+        exceptions = build_exceptions(states)
+
+        # Generate Excel as base64 for download
+        excel_bytes = generate_excel(summary, details, routes, exceptions)
+        excel_b64 = base64.b64encode(excel_bytes).decode()
+
+        return jsonify({
+            'summary':    summary,
+            'details':    details,
+            'routes':     routes,
+            'exceptions': exceptions,
+            'excel_b64':  excel_b64,
+            'stats': {
+                'total_messages': len(messages),
+                'total_people':   len(states),
+                'total_deliveries': len(details),
+                'total_exceptions': len(exceptions),
+            }
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500
+
+
+if __name__ == '__main__':
+    app.run(debug=True, port=5050)
