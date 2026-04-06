@@ -488,24 +488,34 @@ with t5:
         key="store_search_input"
     )
 
-    if not srch_f.empty:
-        if query and query.strip():
-            result = srch_f[
-                srch_f['Store Name'].str.contains(query.strip(), case=False, na=False)
-            ]
-        else:
-            result = srch_f
+   if not srch_f.empty:
+    if query and query.strip():
+        search = query.lower().strip()
 
-        if query.strip():
-            matched_stores = result['Store Name'].nunique()
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Matched Stores",  matched_stores)
-            c2.metric("Total Deliveries", len(result))
-            c3.metric("Delivery Boys",
-                       result['Delivery Boy'].nunique() if not result.empty else 0)
-            ok_count = len(result[result['Status'] == 'OK']) if not result.empty else 0
-            c4.metric("Successful PODs", ok_count)
-            st.markdown("")
+        result = srch_f[
+            srch_f['Store Name'].str.lower().str.startswith(search, na=False)
+        ]
+
+        result = result.drop_duplicates(subset=['Store Name', 'Date', 'Delivery Boy'])
+
+    else:
+        result = srch_f
+
+    if query and query.strip():
+        matched_stores = result['Store Name'].nunique()
+        c1, c2, c3, c4 = st.columns(4)
+
+        c1.metric("Matched Stores", matched_stores)
+        c2.metric("Total Deliveries", len(result))
+        c3.metric(
+            "Delivery Boys",
+            result['Delivery Boy'].nunique() if not result.empty else 0
+        )
+
+        ok_count = len(result[result['Status'] == 'OK']) if not result.empty else 0
+        c4.metric("Successful PODs", ok_count)
+
+        st.markdown("")
 
         if not result.empty:
             st.dataframe(
