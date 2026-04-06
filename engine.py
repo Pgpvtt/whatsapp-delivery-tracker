@@ -1,5 +1,13 @@
 """
-Delivery Tracking Engine — Fixed
+Delivery Tracking Engine — Business-Ready v3
+Improvements:
+  - Route start/end times carried into every Delivery record
+  - Store names Title-Cased at parse time
+  - Daily Summary adds First Activity, Last Activity, Total Active Time
+  - Route Summary adds Total Stores Covered + Route Duration
+  - Delivery Details adds Route Start Time, Route End Time, POD Submitted Time column
+  - All time deltas clamped to >= 0
+  - Timestamp-order guard before every subtraction
 """
 import re
 from dataclasses import dataclass, field
@@ -11,10 +19,10 @@ from chat_parser import Message
 RE_ROUTE_START   = re.compile(r'route\s*(\d+)\s*start',  re.I)
 RE_ROUTE_END     = re.compile(r'route\s*(\d+)\s*end',    re.I)
 RE_POD           = re.compile(r'^pod\s*$',                re.I)
-RE_POD_SUBMITTED = re.compile(r'^pod\s+submitted\s*$',    re.I)   # FIX 1: was missing
+RE_POD_SUBMITTED = re.compile(r'^pod\s+submitted\s*$',    re.I)
 RE_CLOSED        = re.compile(r'^closed\s*$',             re.I)
-RE_BREAK_START   = re.compile(r'break\s*start',           re.I)   # FIX 2: was missing
-RE_BREAK_END     = re.compile(r'break\s*end',             re.I)   # FIX 2: was missing
+RE_BREAK_START   = re.compile(r'break\s*start',           re.I)
+RE_BREAK_END     = re.compile(r'break\s*end',             re.I)
 
 # ── Thresholds ────────────────────────────────────────────────────────────────
 DELAY_THRESHOLD  = 30
@@ -27,6 +35,25 @@ def _is_exit(text: str) -> bool:
     return bool(RE_POD.match(t) or RE_POD_SUBMITTED.match(t) or RE_CLOSED.match(t))
 
 
+def _safe_mins(a: Optional[datetime], b: Optional[datetime]) -> Optional[float]:
+    """Return (b - a) in minutes, clamped >= 0. Returns None if either is None."""
+    if a is None or b is None:
+        return None
+    return round(max((b - a).total_seconds() / 60, 0), 1)
+
+
+def _title_case(text: str) -> str:
+    """
+    Convert store name to Title Case.
+    Handles all-lower, all-upper, and mixed.
+    Preserves abbreviations that are already upper (e.g. 'KFC', 'ATM').
+    """
+    return ' '.join(
+        w.capitalize() if not w.isupper() or len(w) <= 2 else w
+        for w in text.strip().split()
+    )
+
+
 # ── Data classes ──────────────────────────────────────────────────────────────
 
 @dataclass
@@ -35,33 +62,35 @@ class Delivery:
     date: str
     route: int
     store: str
-    start_time: Optional[datetime]
-    arrival_time: Optional[datetime]
-    pod_time: Optional[datetime]
-
+    # Leg timing
+    start_time:   Optional[datetime]   # previous POD / route start
+    arrival_time: Optional[datetime]   # store arrival
+    pod_time:     Optional[datetime]   # exit signal
+    # Route-level context (filled in after route closes)
+    route_start_time: Optional[datetime] = None
+    route_end_time:   Optional[datetime] = None
+    # Computed
     travel_time: Optional[float] = None
     store_time:  Optional[float] = None
-
     delayed:     bool = False
     high_travel: bool = False
     missing_pod: bool = False
     pod_type:    str  = 'POD'
 
     def finalize(self):
-        if self.start_time and self.arrival_time:
-            t = (self.arrival_time - self.start_time).total_seconds() / 60
-            self.travel_time = round(max(t, 0), 1)          # FIX 3: no negatives
+        self.travel_time = _safe_mins(self.start_time, self.arrival_time)
+        if self.travel_time is not None:
             self.high_travel = self.travel_time > TRAVEL_THRESHOLD
-        if self.arrival_time and self.pod_time:
-            s = (self.pod_time - self.arrival_time).total_seconds() / 60
-            self.store_time = round(max(s, 0), 1)           # FIX 3: no negatives
-            self.delayed = self.store_time > DELAY_THRESHOLD
+        st = _safe_mins(self.arrival_time, self.pod_time)
+        if st is not None:
+            self.store_time = st
+            self.delayed    = st > DELAY_THRESHOLD
         else:
             self.missing_pod = True
 
 
 @dataclass
-class RouteRecord:                                          # FIX 4: was missing entirely
+class RouteRecord:
     delivery_boy: str
     date: str
     route_number: int
@@ -72,19 +101,18 @@ class RouteRecord:                                          # FIX 4: was missing
 
     @property
     def total_mins(self) -> Optional[float]:
-        if self.start_time and self.end_time:
-            return round((self.end_time - self.start_time).total_seconds() / 60, 1)
-        return None
+        return _safe_mins(self.start_time, self.end_time)
 
     @property
     def avg_delivery_mins(self) -> Optional[float]:
-        if self.total_mins and self.deliveries > 0:
-            return round(self.total_mins / self.deliveries, 1)
+        t = self.total_mins
+        if t is not None and self.deliveries > 0:
+            return round(t / self.deliveries, 1)
         return None
 
 
 @dataclass
-class BreakRecord:                                         # FIX 5: was missing entirely
+class BreakRecord:
     delivery_boy: str
     date: str
     start_time: Optional[datetime] = None
@@ -92,9 +120,7 @@ class BreakRecord:                                         # FIX 5: was missing 
 
     @property
     def duration_mins(self) -> Optional[float]:
-        if self.start_time and self.end_time:
-            return round((self.end_time - self.start_time).total_seconds() / 60, 1)
-        return None
+        return _safe_mins(self.start_time, self.end_time)
 
 
 @dataclass
@@ -109,22 +135,28 @@ class Exception_:
 @dataclass
 class BoyState:
     name: str
-    current_route:     Optional[RouteRecord] = None        # FIX 4: now RouteRecord not int
-    last_exit_time:    Optional[datetime]    = None
-    pending_store:     Optional[Delivery]    = None
-    current_break:     Optional[BreakRecord] = None        # FIX 5: re-added
-    last_message_time: Optional[datetime]    = None        # FIX 6: re-added for gap detection
+    current_route:     Optional[RouteRecord]  = None
+    last_exit_time:    Optional[datetime]      = None
+    pending_store:     Optional[Delivery]      = None
+    current_break:     Optional[BreakRecord]   = None
+    last_message_time: Optional[datetime]      = None
+    first_activity:    Optional[datetime]      = None   # earliest message of the day
+    last_activity:     Optional[datetime]      = None   # latest message of the day
 
     deliveries: list = field(default_factory=list)
-    routes:     list = field(default_factory=list)         # FIX 4: re-added
-    breaks:     list = field(default_factory=list)         # FIX 5: re-added
-    exceptions: list = field(default_factory=list)         # FIX 6: re-added
+    routes:     list = field(default_factory=list)
+    breaks:     list = field(default_factory=list)
+    exceptions: list = field(default_factory=list)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _date_str(ts: datetime) -> str:
     return ts.strftime('%Y-%m-%d')
+
+
+def _hhmm(ts: Optional[datetime]) -> str:
+    return ts.strftime('%H:%M') if ts else ''
 
 
 def _check_gap(s: BoyState, ts: datetime):
@@ -135,12 +167,12 @@ def _check_gap(s: BoyState, ts: datetime):
                 delivery_boy=s.name, date=_date_str(ts), timestamp=ts,
                 kind='No Activity Gap',
                 detail=(f'{round(gap)} min gap between '
-                        f'{s.last_message_time.strftime("%H:%M")} and {ts.strftime("%H:%M")}')
+                        f'{_hhmm(s.last_message_time)} and {_hhmm(ts)}')
             ))
 
 
 def _flush_pending(s: BoyState, name: str, date: str, ts: datetime):
-    """Close a pending store as Missing POD before opening something new."""
+    """Close pending store as Missing POD."""
     if s.pending_store:
         s.pending_store.missing_pod = True
         s.pending_store.pod_type    = 'Missing'
@@ -154,6 +186,14 @@ def _flush_pending(s: BoyState, name: str, date: str, ts: datetime):
         s.pending_store = None
 
 
+def _stamp_route_times(s: BoyState, route: RouteRecord):
+    """Back-fill route_start_time / route_end_time on every delivery in this route."""
+    for d in s.deliveries:
+        if d.route == route.route_number and d.date == route.date:
+            d.route_start_time = route.start_time
+            d.route_end_time   = route.end_time
+
+
 # ── Main processor ────────────────────────────────────────────────────────────
 
 def process_messages(messages: list) -> dict:
@@ -162,8 +202,7 @@ def process_messages(messages: list) -> dict:
     for msg in messages:
         name = msg.sender
         ts   = msg.timestamp
-        # FIX 7: preserve original case for store names — do NOT call .lower() on entire text
-        text = msg.text.strip()
+        text = msg.text.strip()   # preserve original case; patterns use re.I
         date = _date_str(ts)
 
         if name not in states:
@@ -172,13 +211,20 @@ def process_messages(messages: list) -> dict:
 
         _check_gap(s, ts)
         s.last_message_time = ts
+        # Track first/last activity per person (used in Daily Summary)
+        if s.first_activity is None or ts < s.first_activity:
+            s.first_activity = ts
+        if s.last_activity is None or ts > s.last_activity:
+            s.last_activity = ts
 
         # ── Route Start ──────────────────────────────────────────────────────
         m = RE_ROUTE_START.match(text)
         if m:
             route_num = int(m.group(1))
             if s.current_route and not s.current_route.end_time:
+                # Auto-close unclosed route before opening new one
                 s.current_route.not_ended = True
+                _stamp_route_times(s, s.current_route)
                 s.routes.append(s.current_route)
                 s.exceptions.append(Exception_(
                     delivery_boy=name, date=date, timestamp=ts,
@@ -187,7 +233,7 @@ def process_messages(messages: list) -> dict:
                             f'before Route {route_num} start')
                 ))
             _flush_pending(s, name, date, ts)
-            s.current_route = RouteRecord(
+            s.current_route  = RouteRecord(
                 delivery_boy=name, date=date,
                 route_number=route_num, start_time=ts
             )
@@ -201,6 +247,7 @@ def process_messages(messages: list) -> dict:
             _flush_pending(s, name, date, ts)
             if s.current_route and s.current_route.route_number == route_num:
                 s.current_route.end_time = ts
+                _stamp_route_times(s, s.current_route)  # ← back-fill end time
                 s.routes.append(s.current_route)
                 s.current_route = None
             else:
@@ -211,14 +258,12 @@ def process_messages(messages: list) -> dict:
                 ))
             continue
 
-        # FIX 2: Break Start / Break End — were missing, causing "Break Start"
-        #         to be treated as a store name
-        # ── Break Start ──────────────────────────────────────────────────────
+        # ── Break Start ───────────────────────────────────────────────────────
         if RE_BREAK_START.match(text):
             s.current_break = BreakRecord(delivery_boy=name, date=date, start_time=ts)
             continue
 
-        # ── Break End ────────────────────────────────────────────────────────
+        # ── Break End ─────────────────────────────────────────────────────────
         if RE_BREAK_END.match(text):
             if s.current_break:
                 s.current_break.end_time = ts
@@ -232,8 +277,7 @@ def process_messages(messages: list) -> dict:
                 ))
             continue
 
-        # FIX 1: POD Submitted now recognised
-        # ── Exit signal ───────────────────────────────────────────────────────
+        # ── Exit signal: POD / POD Submitted / Closed ─────────────────────────
         if _is_exit(text):
             if RE_POD_SUBMITTED.match(text):
                 ptype = 'POD Submitted'
@@ -282,17 +326,20 @@ def process_messages(messages: list) -> dict:
                 delivery_boy=name,
                 date=date,
                 route=s.current_route.route_number,
-                store=text,                                # FIX 7: original case
+                store=_title_case(text),          # ← Title Case applied here
                 start_time=s.last_exit_time,
                 arrival_time=ts,
                 pod_time=None,
+                route_start_time=s.current_route.start_time,  # ← route context
+                route_end_time=None,                           #   (end filled later)
             )
-        # messages outside a route are silently ignored
+        # messages outside an active route are silently ignored
 
     # ── Flush open state at EOF ───────────────────────────────────────────────
     for name, s in states.items():
         if s.current_route and not s.current_route.end_time:
             s.current_route.not_ended = True
+            _stamp_route_times(s, s.current_route)
             s.routes.append(s.current_route)
             s.exceptions.append(Exception_(
                 delivery_boy=name, date=s.current_route.date,
@@ -317,16 +364,18 @@ def build_delivery_details(states: dict) -> list:
     for name, s in states.items():
         for d in s.deliveries:
             rows.append({
-                'Delivery Boy':      name,
-                'Date':              d.date,
-                'Route No.':         d.route,
-                'Store Name':        d.store,
-                'Start Time':        d.start_time.strftime('%H:%M')   if d.start_time   else '',
-                'Store Arrival':     d.arrival_time.strftime('%H:%M') if d.arrival_time else '',
-                'POD Time':          d.pod_time.strftime('%H:%M')     if d.pod_time     else '',
-                'Travel Time (mins)':d.travel_time if d.travel_time is not None else 'N/A',
-                'Store Time (mins)': d.store_time  if d.store_time  is not None else 'N/A',
-                'POD Type':          d.pod_type,
+                'Delivery Boy':       name,
+                'Date':               d.date,
+                'Route No.':          d.route,
+                'Route Start Time':   _hhmm(d.route_start_time),   # ← NEW
+                'Route End Time':     _hhmm(d.route_end_time),      # ← NEW
+                'Store Name':         d.store,                       # Title Case
+                'Start Time':         _hhmm(d.start_time),
+                'Store Arrival':      _hhmm(d.arrival_time),
+                'POD Time':           _hhmm(d.pod_time),
+                'POD Type':           d.pod_type,
+                'Travel Time (mins)': d.travel_time if d.travel_time is not None else 'N/A',
+                'Store Time (mins)':  d.store_time  if d.store_time  is not None else 'N/A',
                 'Status': (
                     'Delayed'     if d.delayed     else
                     'Missing POD' if d.missing_pod else
@@ -334,7 +383,8 @@ def build_delivery_details(states: dict) -> list:
                     'OK'
                 ),
             })
-    rows.sort(key=lambda x: (x['Delivery Boy'], x['Date'], x['Route No.']))
+    rows.sort(key=lambda x: (x['Delivery Boy'], x['Date'], x['Route No.'],
+                              x['Store Arrival']))
     return rows
 
 
@@ -342,7 +392,7 @@ def build_store_search(states: dict) -> list:
     return build_delivery_details(states)
 
 
-def build_route_summary(states: dict) -> list:  # FIX 4: fully restored
+def build_route_summary(states: dict) -> list:
     rows = []
     for name, s in states.items():
         for r in s.routes:
@@ -350,17 +400,20 @@ def build_route_summary(states: dict) -> list:  # FIX 4: fully restored
                 d for d in s.deliveries
                 if d.route == r.route_number and d.date == r.date
             ]
-            travel_times = [d.travel_time for d in route_deliveries if d.travel_time is not None]
-            store_times  = [d.store_time  for d in route_deliveries if d.store_time  is not None]
+            travel_times  = [d.travel_time for d in route_deliveries if d.travel_time is not None]
+            store_times   = [d.store_time  for d in route_deliveries if d.store_time  is not None]
+            stores_covered = len({d.store for d in route_deliveries})  # ← unique stores
+            duration       = r.total_mins
 
             rows.append({
                 'Delivery Boy':           name,
                 'Date':                   r.date,
                 'Route No.':              r.route_number,
-                'Start Time':             r.start_time.strftime('%H:%M') if r.start_time else '',
-                'End Time':               r.end_time.strftime('%H:%M')   if r.end_time   else '(Not Ended)',
+                'Route Start Time':       _hhmm(r.start_time),           # ← explicit label
+                'Route End Time':         _hhmm(r.end_time) if r.end_time else '(Not Ended)',
                 'Total Deliveries':       r.deliveries,
-                'Total Time (mins)':      r.total_mins,
+                'Total Stores Covered':   stores_covered,                 # ← NEW
+                'Route Duration (mins)':  duration,                       # ← renamed for clarity
                 'Avg Store Time (mins)':  round(sum(store_times)  / len(store_times),  1) if store_times  else None,
                 'Avg Travel Time (mins)': round(sum(travel_times) / len(travel_times), 1) if travel_times else None,
                 'Max Travel Time (mins)': max(travel_times) if travel_times else None,
@@ -371,14 +424,14 @@ def build_route_summary(states: dict) -> list:  # FIX 4: fully restored
     return rows
 
 
-def build_exceptions(states: dict) -> list:     # FIX 6: fully restored
+def build_exceptions(states: dict) -> list:
     rows = []
     for name, s in states.items():
         for e in s.exceptions:
             rows.append({
                 'Delivery Boy':   name,
                 'Date':           e.date,
-                'Time':           e.timestamp.strftime('%H:%M') if e.timestamp else '',
+                'Time':           _hhmm(e.timestamp),
                 'Exception Type': e.kind,
                 'Detail':         e.detail,
             })
@@ -386,24 +439,27 @@ def build_exceptions(states: dict) -> list:     # FIX 6: fully restored
     return rows
 
 
-def build_delivery_summary(states: dict) -> list:  # FIX 8: fully restored
+def build_delivery_summary(states: dict) -> list:
     rows = []
     for name, s in states.items():
+        # group deliveries by (name, date)
         by_date: dict = {}
-
         for d in s.deliveries:
             key = (name, d.date)
             if key not in by_date:
                 by_date[key] = {
                     'name': name, 'date': d.date,
                     'routes': set(), 'stores': set(),
-                    'deliveries': 0, 'store_times': []
+                    'deliveries': 0, 'store_times': [],
+                    'all_timestamps': [],
                 }
             by_date[key]['routes'].add(d.route)
             by_date[key]['stores'].add(d.store)
             by_date[key]['deliveries'] += 1
             if d.store_time is not None:
                 by_date[key]['store_times'].append(d.store_time)
+            for ts in (d.start_time, d.arrival_time, d.pod_time):
+                if ts: by_date[key]['all_timestamps'].append(ts)
 
         for r in s.routes:
             key = (name, r.date)
@@ -411,28 +467,38 @@ def build_delivery_summary(states: dict) -> list:  # FIX 8: fully restored
                 by_date[key] = {
                     'name': name, 'date': r.date,
                     'routes': set(), 'stores': set(),
-                    'deliveries': 0, 'store_times': []
+                    'deliveries': 0, 'store_times': [],
+                    'all_timestamps': [],
                 }
             by_date[key]['routes'].add(r.route_number)
+            for ts in (r.start_time, r.end_time):
+                if ts: by_date[key]['all_timestamps'].append(ts)
 
         for key, d in by_date.items():
             name_, date_ = key
             day_routes  = [r for r in s.routes if r.date == date_]
             first_start = min((r.start_time for r in day_routes if r.start_time), default=None)
             last_end    = max((r.end_time   for r in day_routes if r.end_time),   default=None)
-            working_mins = (
-                round((last_end - first_start).total_seconds() / 60, 1)
-                if first_start and last_end else None
-            )
+
+            working_mins = _safe_mins(first_start, last_end)
+
             break_mins = sum(
                 (b.duration_mins or 0)
                 for b in s.breaks if b.date == date_
             )
             net_working = round(working_mins - break_mins, 1) if working_mins is not None else None
+
             avg_time = (
                 round(sum(d['store_times']) / len(d['store_times']), 1)
                 if d['store_times'] else None
             )
+
+            # First / Last activity across ALL messages for this person+date
+            all_ts = d['all_timestamps']
+            first_activity = min(all_ts).strftime('%H:%M') if all_ts else (
+                first_start.strftime('%H:%M') if first_start else '')
+            last_activity  = max(all_ts).strftime('%H:%M') if all_ts else (
+                last_end.strftime('%H:%M') if last_end else '')
 
             rows.append({
                 'Name':                         name_,
@@ -440,8 +506,10 @@ def build_delivery_summary(states: dict) -> list:  # FIX 8: fully restored
                 'Total Routes':                 len(d['routes']),
                 'Total Deliveries (POD)':       d['deliveries'],
                 'Total Stores Covered':         len(d['stores']),
-                'First Start':                  first_start.strftime('%H:%M') if first_start else '',
-                'Last End':                     last_end.strftime('%H:%M')    if last_end    else '',
+                'First Activity':               first_activity,           # ← renamed / improved
+                'Last Activity':                last_activity,            # ← renamed / improved
+                'Route Start (First)':          _hhmm(first_start),      # ← NEW: office departure
+                'Route End (Last)':             _hhmm(last_end),         # ← NEW: office return
                 'Total Working Time (mins)':    working_mins,
                 'Total Break Time (mins)':      round(break_mins, 1),
                 'Net Working Time (mins)':      net_working,

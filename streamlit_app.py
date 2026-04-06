@@ -406,8 +406,8 @@ with t2:
                          f"{row['Avg Time per Delivery (mins)']} min"
                          if row['Avg Time per Delivery (mins)'] else "—")
                 e, f_, g, h = st.columns(4)
-                e.metric("First Start",  row['First Start'])
-                f_.metric("Last End",    row['Last End'])
+                e.metric("First Activity", row['First Activity'])
+                f_.metric("Last Activity",  row['Last Activity'])
                 g.metric("Break Time",   f"{row['Total Break Time (mins)']} min")
                 h.metric("Stores",       row['Total Stores Covered'])
 
@@ -458,8 +458,8 @@ with t4:
                 b.metric("End",        row['End Time'])
                 c.metric("Deliveries", row['Total Deliveries'])
                 d.metric("Total Time",
-                         f"{row['Total Time (mins)']} min"
-                         if row['Total Time (mins)'] else "—")
+                         f"{row['Route Duration (mins)']} min"
+                         if row['Route Duration (mins)'] else "—")
                 e, f_, g, h = st.columns(4)
                 e.metric("Avg Store Time",
                          f"{row['Avg Store Time (mins)']} min"
