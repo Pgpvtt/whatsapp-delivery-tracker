@@ -488,7 +488,10 @@ with t5:
         key="store_search_input"
     )
 
-   if not srch_f.empty:
+   query = st.text_input(...)
+
+if not srch_f.empty:
+
     if query and query.strip():
         search = query.lower().strip()
 
@@ -503,10 +506,12 @@ with t5:
 
     if query and query.strip():
         matched_stores = result['Store Name'].nunique()
+
         c1, c2, c3, c4 = st.columns(4)
 
         c1.metric("Matched Stores", matched_stores)
         c2.metric("Total Deliveries", len(result))
+
         c3.metric(
             "Delivery Boys",
             result['Delivery Boy'].nunique() if not result.empty else 0
@@ -515,8 +520,7 @@ with t5:
         ok_count = len(result[result['Status'] == 'OK']) if not result.empty else 0
         c4.metric("Successful PODs", ok_count)
 
-        st.markdown("")
-
+    st.markdown("")
         if not result.empty:
             st.dataframe(
                 style_details(result.reset_index(drop=True)),
