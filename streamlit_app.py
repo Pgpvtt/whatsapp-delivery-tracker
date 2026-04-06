@@ -10,7 +10,9 @@ import pandas as pd
 from datetime import datetime, date, timedelta
 
 from chat_parser import parse_chat
-from engine import *
+from engine import (process_messages, build_delivery_summary,
+                          build_delivery_details, build_route_summary,
+                          build_exceptions, build_store_search)
 from reporter    import generate_excel
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -478,85 +480,67 @@ with t4:
 with t5:
     sec("🔍", "Store Search")
     st.markdown(
-    "Type a store name (or part of it) to find all deliveries to that store "
-    "across all delivery boys and dates."
-)
+        "Type a store name (or part of it) to find all deliveries to that store "
+        "across all delivery boys and dates."
+    )
 
-query = st.text_input(
-    "Search store name",
-    placeholder="e.g. Sharma, Medical, Pharmacy…",
-    key="store_search_input"
-)
+    query = st.text_input(
+        "Search store name",
+        placeholder="e.g. Sharma, Medical, Pharmacy…",
+        key="store_search_input"
+    )
 
-if not srch_f.empty:
+    if not srch_f.empty:
+        if query and query.strip():
+            result = srch_f[
+                srch_f['Store Name'].str.contains(query.strip(), case=False, na=False)
+            ]
+        else:
+            result = srch_f
 
-    if query and query.strip():
-        search = query.lower().strip()
+        if query and query.strip():
+            matched_stores = result['Store Name'].nunique()
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Matched Stores",  matched_stores)
+            c2.metric("Total Deliveries", len(result))
+            c3.metric("Delivery Boys",
+                       result['Delivery Boy'].nunique() if not result.empty else 0)
+            ok_count = len(result[result['Status'] == 'OK']) if not result.empty else 0
+            c4.metric("Successful PODs", ok_count)
+            st.markdown("")
 
-        result = srch_f[
-            srch_f['Store Name'].str.lower().str.startswith(search, na=False)
-        ]
-
-        result = result.drop_duplicates(
-            subset=['Store Name', 'Date', 'Delivery Boy']
-        )
-
-    else:
-        result = srch_f
-
-    if query and query.strip():
-        matched_stores = result['Store Name'].nunique()
-
-        c1, c2, c3, c4 = st.columns(4)
-
-        c1.metric("Matched Stores", matched_stores)
-        c2.metric("Total Deliveries", len(result))
-
-        c3.metric(
-            "Delivery Boys",
-            result['Delivery Boy'].nunique() if not result.empty else 0
-        )
-
-        ok_count = len(result[result['Status'] == 'OK']) if not result.empty else 0
-        c4.metric("Successful PODs", ok_count)
-
-    st.markdown("")
-
-    if not result.empty:
-        st.dataframe(
-            style_details(result.reset_index(drop=True)),
-            use_container_width=True,
-            height=min(640, 60 + len(result) * 38),
-        )
-        st.caption(f"Showing {len(result)} record(s)")
-
-        if result['Store Name'].nunique() > 1:
-            st.markdown("#### 📊 Breakdown by Store")
-
-            breakdown = (
-                result.groupby('Store Name')
-                .agg(
-                    Deliveries=('Store Name','count'),
-                    Delivery_Boys=('Delivery Boy','nunique'),
-                    Avg_Store_Time=('Store Time (mins)',
-                        lambda x: round(
-                            pd.to_numeric(x, errors='coerce').dropna().mean(), 1
-                        ) if pd.to_numeric(x, errors='coerce').dropna().size else None),
-                )
-                .reset_index()
-                .rename(columns={
-                    'Delivery_Boys': 'Delivery Boys',
-                    'Avg_Store_Time': 'Avg Store Time (mins)',
-                })
+        if not result.empty:
+            st.dataframe(
+                style_details(result.reset_index(drop=True)),
+                use_container_width=True,
+                height=min(640, 60 + len(result) * 38),
             )
+            st.caption(f"Showing {len(result)} record(s)")
 
-            st.dataframe(breakdown, use_container_width=True)
+            if result['Store Name'].nunique() > 1:
+                st.markdown("#### 📊 Breakdown by Store")
+                breakdown = (
+                    result.groupby('Store Name')
+                    .agg(
+                        Deliveries=('Store Name', 'count'),
+                        Delivery_Boys=('Delivery Boy', 'nunique'),
+                        Avg_Store_Time=('Store Time (mins)',
+                            lambda x: round(
+                                pd.to_numeric(x, errors='coerce').dropna().mean(), 1
+                            ) if pd.to_numeric(x, errors='coerce').dropna().size else None),
+                    )
+                    .reset_index()
+                    .rename(columns={
+                        'Delivery_Boys': 'Delivery Boys',
+                        'Avg_Store_Time': 'Avg Store Time (mins)',
+                    })
+                )
+                st.dataframe(breakdown, use_container_width=True)
 
-    elif query and query.strip():
-        st.info(f'No deliveries found matching "{query}"')
-
-else:
-    st.info("No delivery data available.")
+        elif query and query.strip():
+            st.info(f'No deliveries found matching "{query}"')
+    else:
+        st.info("No delivery data available.")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 6 — FLAGS & EXCEPTIONS
